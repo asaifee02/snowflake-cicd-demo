@@ -1,0 +1,11 @@
+SELECT
+    CASE
+        WHEN COUNT(*) = 3
+         AND SUM(TOTAL_SALES) = 8000
+         AND COUNT_IF(
+             REGION IS NULL OR TRIM(REGION) = ''
+         ) = 0
+        THEN 'PASS'
+        ELSE 'FAIL'
+    END AS TEST_RESULT
+FROM SALES_DEV.ANALYTICS.SALES_SUMMARY;
