@@ -1,0 +1,10 @@
+
+[sqlfluff]
+dialect = snowflake
+templater = placeholder
+max_line_length = 120
+
+[sqlfluff:templater:placeholder]
+param_regex = <%\s*(?P<param_name>\w+)\s*%>
+database = SALES_CI_SAMPLE
+batch_id = 1

@@ -1,0 +1,145 @@
+
+name: Snowflake CI Demo
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-sql:
+    name: SQL Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install SQLFluff
+        run: |
+          python -m pip install -r requirements-ci.txt
+
+      - name: Lint deployment SQL
+        run: |
+          sqlfluff lint sql/deploy/
+
+  integration-test:
+    name: Snowflake Integration
+    needs: lint-sql
+
+    # Never give forked PR code Snowflake credentials.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    runs-on: ubuntu-latest
+    environment: ci
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_CI_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_CI_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_CI_WAREHOUSE }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Snowflake CLI with OIDC
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+          cli-version: '3.16'
+
+      - name: Verify Snowflake connection
+        run: |
+          snow connection test -x
+
+      - name: Run isolated ETL integration test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DB="CI_PR_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+
+          cleanup() {
+            rc=$?
+            trap - EXIT
+
+            echo "Cleaning up CI database: $DB"
+
+            if ! snow sql -x -q "DROP DATABASE IF EXISTS $DB"; then
+              echo "::error::CI database cleanup failed: $DB"
+              rc=1
+            fi
+
+            exit "$rc"
+          }
+
+          trap cleanup EXIT
+
+          echo "Creating temporary database: $DB"
+          snow sql -x -q "CREATE DATABASE $DB"
+
+          echo "Creating schemas and tables"
+          snow sql -x \
+            -f sql/deploy/01_create_schemas.sql \
+            -f sql/deploy/02_create_tables.sql \
+            -D "database=$DB"
+
+          echo "Loading batch 1"
+          snow sql -x \
+            -f tests/fixtures/batch_1.sql \
+            -D "database=$DB"
+
+          echo "Merging batch 1"
+          snow sql -x \
+            -f sql/deploy/03_merge_sales.sql \
+            -D "database=$DB" \
+            -D "batch_id=1"
+
+          echo "Loading batch 2"
+          snow sql -x \
+            -f tests/fixtures/batch_2.sql \
+            -D "database=$DB"
+
+          echo "Merging batch 2"
+          snow sql -x \
+            -f sql/deploy/03_merge_sales.sql \
+            -D "database=$DB" \
+            -D "batch_id=2"
+
+          echo "Checking MERGE idempotency"
+          snow sql -x \
+            -f sql/deploy/03_merge_sales.sql \
+            -D "database=$DB" \
+            -D "batch_id=2"
+
+          echo "Creating analytics view"
+          snow sql -x \
+            -f sql/deploy/04_create_analytics.sql \
+            -D "database=$DB"
+
+          echo "Running integration assertions"
+          snow sql -x \
+            -f tests/test_ci_sales.sql \
+            -D "database=$DB"
+
+          echo "All Snowflake integration tests passed"
