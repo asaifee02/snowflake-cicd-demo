@@ -1,0 +1,25 @@
+EXECUTE IMMEDIATE $$
+DECLARE
+    RELEASE_NOT_READY EXCEPTION (
+        -20010,
+        'Selected release is not the latest successful STAGING release'
+    );
+    V_RELEASE_SHA VARCHAR;
+    V_EXPECTED_SHA VARCHAR DEFAULT '<% release_sha %>';
+
+BEGIN
+    SELECT MAX_BY(GIT_SHA, DEPLOYED_AT)
+      INTO :V_RELEASE_SHA
+    FROM SALES_STAGING.CI_CD.DEPLOYMENT_HISTORY
+    WHERE STATUS = 'SUCCESS';
+
+    IF (
+        V_RELEASE_SHA IS NULL
+        OR V_RELEASE_SHA <> V_EXPECTED_SHA
+    ) THEN
+        RAISE RELEASE_NOT_READY;
+    END IF;
+
+    RETURN 'PASS: Selected release matches STAGING';
+END;
+$$;

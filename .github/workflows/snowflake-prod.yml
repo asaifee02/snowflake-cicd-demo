@@ -1,0 +1,155 @@
+
+name: Snowflake Production Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: "40-character Git SHA tested in STAGING"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snowflake-sales-production
+  cancel-in-progress: false
+
+jobs:
+  verify-release:
+    name: Verify Release Candidate
+    runs-on: ubuntu-latest
+    environment: staging
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      RELEASE_SHA: ${{ inputs.release_sha }}
+
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_STAGING_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_STAGING_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_STAGING_WAREHOUSE }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release SHA and main ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Expected a full lowercase Git SHA"
+            exit 1
+          fi
+
+          # Release workflow must be launched from main.
+          test "$GITHUB_REF" = "refs/heads/main"
+
+          git fetch origin main
+
+          # The release must be reachable from main.
+          git cat-file -e "${RELEASE_SHA}^{commit}"
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+
+          echo "Verified release commit: $RELEASE_SHA"
+
+      - name: Install Snowflake CLI
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+          cli-version: '3.30.0'
+
+      - name: Verify staging identity
+        run: snow connection test -x
+
+      - name: Confirm staging release
+        run: |
+          snow sql -x \
+            -f tests/verify_staging_release.sql \
+            -D "release_sha=$RELEASE_SHA"
+
+  deploy-production:
+    name: Deploy SALES_PROD
+    needs: verify-release
+    runs-on: ubuntu-latest
+
+    # The protection rules configured on this environment
+    # are the mandatory approval gate.
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      RELEASE_SHA: ${{ inputs.release_sha }}
+      DEPLOY_ENVIRONMENT: PROD
+      DEPLOY_DATABASE: SALES_PROD
+
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_PROD_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_PROD_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_PROD_WAREHOUSE }}
+
+    steps:
+      - name: Checkout pinned release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_sha }}
+          persist-credentials: false
+
+      - name: Verify checked-out commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$RELEASE_SHA"
+
+          echo "Production release SHA verified"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Snowflake CLI
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+          cli-version: '3.30.0'
+
+      - name: Verify production identity
+        run: |
+          snow connection test -x
+
+          snow sql -x -q "
+            SELECT
+              CURRENT_USER(),
+              CURRENT_ROLE(),
+          "
+
+      - name: Apply and validate PROD migrations
+        run: python scripts/deploy.py
+
+      - name: Publish release summary
+        if: success()
+        run: |
+          {
+            echo "## Snowflake Production Release"
+            echo ""
+            echo "- Environment: PROD"
+            echo "- Database: SALES_PROD"
+            echo "- Release SHA: $RELEASE_SHA"
+            echo "- Status: SUCCESS"
+            echo "- Workflow run: $GITHUB_RUN_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
