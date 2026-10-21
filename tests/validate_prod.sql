@@ -53,10 +53,12 @@ BEGIN
       AND (
           (COLUMN_NAME = 'ORDER_DATE'
               AND ORDINAL_POSITION = 1)
-          OR (COLUMN_NAME = 'TOTAL_ORDERS'
+          OR (COLUMN_NAME = 'REGION'
               AND ORDINAL_POSITION = 2)
-          OR (COLUMN_NAME = 'TOTAL_SALES'
+          OR (COLUMN_NAME = 'TOTAL_ORDERS'
               AND ORDINAL_POSITION = 3)
+          OR (COLUMN_NAME = 'TOTAL_SALES'
+              AND ORDINAL_POSITION = 4)
       );
 
     SELECT COUNT(*)
@@ -73,7 +75,7 @@ BEGIN
         OR V_SOURCE_TOTAL <> V_VIEW_TOTAL
         OR V_DUPLICATES <> 0
         OR V_INVALID <> 0
-        OR V_COLUMNS <> 3
+        OR V_COLUMNS <> 4
         OR V_MIGRATION_DUPLICATES <> 0
     ) THEN
         RAISE VALIDATION_FAILED;
