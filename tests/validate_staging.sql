@@ -1,0 +1,58 @@
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    TEST_FAILED EXCEPTION (
+        -20002,
+        'STAGING release validation failed'
+    );
+
+    V_ROWS NUMBER;
+    V_TOTAL NUMBER(18,2);
+    V_VIEW_ROWS NUMBER;
+    V_VIEW_TOTAL NUMBER(18,2);
+    V_INVALID NUMBER;
+    V_DUPLICATES NUMBER;
+
+BEGIN
+    SELECT COUNT(*), COALESCE(SUM(AMOUNT), 0)
+    INTO :V_ROWS, :V_TOTAL
+    FROM <% database %>.STAGING.SALES_CLEAN;
+
+    SELECT
+        COALESCE(SUM(TOTAL_ORDERS), 0),
+        COALESCE(SUM(TOTAL_SALES), 0)
+    INTO :V_VIEW_ROWS, :V_VIEW_TOTAL
+    FROM <% database %>.ANALYTICS.DAILY_SALES;
+
+    SELECT COUNT(*)
+    INTO :V_INVALID
+    FROM <% database %>.STAGING.SALES_CLEAN
+    WHERE ORDER_ID IS NULL
+       OR REGION IS NULL
+       OR TRIM(REGION) = ''
+       OR AMOUNT IS NULL
+       OR AMOUNT <= 0
+       OR ORDER_DATE IS NULL;
+
+    SELECT COUNT(*)
+    INTO :V_DUPLICATES
+    FROM (
+        SELECT ORDER_ID
+        FROM <% database %>.STAGING.SALES_CLEAN
+        GROUP BY ORDER_ID
+        HAVING COUNT(*) > 1
+    );
+
+    IF (
+        V_ROWS = 0
+        OR V_ROWS <> V_VIEW_ROWS
+        OR V_TOTAL <> V_VIEW_TOTAL
+        OR V_INVALID <> 0
+        OR V_DUPLICATES <> 0
+    ) THEN
+        RAISE TEST_FAILED;
+    END IF;
+
+    RETURN 'PASS: STAGING release validated';
+END;
+$$;
