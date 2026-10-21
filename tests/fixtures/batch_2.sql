@@ -1,0 +1,17 @@
+
+INSERT INTO <% database %>.RAW.SALES_EVENTS (
+    EVENT_ID, BATCH_ID, ORDER_ID, REGION,
+    AMOUNT, ORDER_DATE, SOURCE_UPDATED_AT
+)
+SELECT
+    COLUMN1, COLUMN2, COLUMN3, COLUMN4,
+    COLUMN5, COLUMN6, TO_TIMESTAMP_NTZ(COLUMN7)
+FROM VALUES
+    (201, 2, '2', 'Pune', '2200',
+     '2026-10-02', '2026-10-10 10:00:00'),
+    (202, 2, '7', 'Delhi', '700',
+     '2026-10-07', '2026-10-10 11:00:00'),
+    (203, 2, '2', 'Pune', '1900',
+     '2026-10-02', '2026-10-01 10:00:00'),
+    (204, 2, '8', '   ', '400',
+     '2026-10-08', '2026-10-10 12:00:00');
