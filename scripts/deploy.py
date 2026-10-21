@@ -23,7 +23,7 @@ MIGRATION_PATTERN = re.compile(
 
 
 def execute(query=None, file=None, variables=None):
-    command = ["snow", "sql", "-x", "--format", "JSON"]
+    command = ["snow", "sql", "-x", "--format", "JSON", "--enhanced-exit-codes"]
 
     if file is not None:
         command += ["-f", str(file)]
@@ -37,6 +37,22 @@ def execute(query=None, file=None, variables=None):
         command, check=True,
         capture_output=True, text=True
     )
+
+    if result.returncode != 0:
+        print("Snowflake CLI command failed", flush=True)
+        print("Command:", command, flush=True)
+        print("Exit code:", result.returncode, flush=True)
+
+        if result.stdout:
+            print("STDOUT:", result.stdout, flush=True)
+
+        if result.stderr:
+            print("STDERR:", result.stderr, flush=True)
+
+        raise RuntimeError(
+            f"Snowflake SQL execution failed: "
+            f"exit code {result.returncode}"
+        )
 
     return result.stdout
 
