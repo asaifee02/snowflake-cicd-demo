@@ -7,26 +7,26 @@ import subprocess
 import sys
 from pathlib import Path
 
-DATABASE = "SALES_DEV"
+DATABASES = {
+    "DEV": "SALES_DEV",
+    "STAGING": "SALES_STAGING",
+    "CI": None,
+}
+
 MIGRATION_DIR = Path("sql/migrations")
 BOOTSTRAP = Path(
     "sql/bootstrap/01_deployment_tracking.sql"
 )
-VALIDATION = Path("tests/validate_dev.sql")
-
-PATTERN = re.compile(
-    r"^(V[0-9]{3})__[a-z0-9_]+\.sql$"
+MIGRATION_PATTERN = re.compile(
+    r"^(V\d{3})__[a-z0-9_]+\.sql$"
 )
 
 
-def run_sql(query=None, filename=None, variables=None):
-    command = [
-        "snow", "sql", "-x",
-        "--format", "JSON",
-    ]
+def execute(query=None, file=None, variables=None):
+    command = ["snow", "sql", "-x", "--format", "JSON"]
 
-    if filename:
-        command += ["-f", str(filename)]
+    if file is not None:
+        command += ["-f", str(file)]
     else:
         command += ["-q", query]
 
@@ -34,191 +34,211 @@ def run_sql(query=None, filename=None, variables=None):
         command += ["-D", f"{key}={value}"]
 
     result = subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
+        command, check=True,
+        capture_output=True, text=True
     )
 
     return result.stdout
 
 
-def query_rows(query):
-    output = run_sql(query=query)
-    rows = json.loads(output)
-
-    if not isinstance(rows, list):
-        raise RuntimeError(
-            "Unexpected Snowflake JSON response"
-        )
-
-    return rows
+def rows(query):
+    data = json.loads(execute(query=query))
+    if not isinstance(data, list):
+        raise RuntimeError("Unexpected SQL JSON output")
+    return data
 
 
-def sql_literal(value):
-    # Used for values only, never SQL identifiers.
-    return "'" + value.replace("'", "''") + "'"
+def literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
 
 
-def checksum(path):
-    return hashlib.sha256(
-        path.read_bytes()
-    ).hexdigest()
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def bootstrap():
-    print("Preparing deployment metadata...")
-    run_sql(filename=BOOTSTRAP)
+def discover_migrations():
+    migrations = {}
+    versions = set()
 
-
-def get_existing_migrations():
-    rows = query_rows(f"""
-        SELECT VERSION, CHECKSUM
-        FROM {DATABASE}.CI_CD.SCHEMA_MIGRATIONS
-    """)
-
-    existing = {}
-
-    for row in rows:
-        version = row["VERSION"]
-
-        if version in existing:
-            raise RuntimeError(
-                f"Duplicate ledger version: {version}"
-            )
-
-        existing[version] = row["CHECKSUM"]
-
-    return existing
-
-
-def apply_migrations(git_sha):
-    existing = get_existing_migrations()
-    seen = set()
-
-    migrations = sorted(
-        MIGRATION_DIR.glob("V*.sql")
-    )
-
-    for file in migrations:
-        match = PATTERN.fullmatch(file.name)
+    for path in sorted(MIGRATION_DIR.glob("*.sql")):
+        match = MIGRATION_PATTERN.fullmatch(path.name)
 
         if not match:
             raise RuntimeError(
-                f"Invalid migration filename: {file.name}"
+                f"Invalid migration name: {path.name}"
             )
 
         version = match.group(1)
 
-        if version in seen:
+        if version in versions:
             raise RuntimeError(
-                f"Duplicate migration: {version}"
+                f"Duplicate migration version: {version}"
             )
 
-        seen.add(version)
-        digest = checksum(file)
+        versions.add(version)
+        migrations[version] = (path, sha256(path))
 
-        if version in existing:
-            if existing[version] != digest:
-                raise RuntimeError(
-                    f"Checksum mismatch: {file.name}. "
-                    "Applied migrations are immutable."
-                )
+    return migrations
 
-            print(f"SKIP {file.name}")
-            continue
 
-        if existing and version < max(existing):
+def load_history(database):
+    history = {}
+
+    for row in rows(f"""
+        SELECT VERSION, FILE_NAME, CHECKSUM
+        FROM {database}.CI_CD.SCHEMA_MIGRATIONS
+    """):
+        version = row["VERSION"]
+
+        if version in history:
             raise RuntimeError(
-                f"Out-of-order migration: {file.name}"
+                f"Duplicate ledger record: {version}"
             )
 
-        print(f"APPLY {file.name}", flush=True)
-
-        run_sql(
-            filename=file,
-            variables={"database": DATABASE},
+        history[version] = (
+            row["FILE_NAME"],
+            row["CHECKSUM"]
         )
 
-        run_sql(query=f"""
+    return history
+
+
+def verify_history(files, history):
+    # Perform ALL comparisons before new DDL.
+    for version, (filename, digest) in history.items():
+        if version not in files:
+            raise RuntimeError(
+                f"Missing applied migration: {version}"
+            )
+
+        path, actual_digest = files[version]
+
+        if filename != path.name:
+            raise RuntimeError(
+                f"Filename mismatch: {version}"
+            )
+
+        if digest != actual_digest:
+            raise RuntimeError(
+                f"Checksum mismatch: {path.name}"
+            )
+
+    pending = [
+        version for version in files
+        if version not in history
+    ]
+
+    if pending and history:
+        if min(pending) < max(history):
+            raise RuntimeError(
+                "Out-of-order migration detected"
+            )
+
+    return sorted(pending)
+
+
+def run(database, environment, git_sha, run_id):
+    execute(
+        file=BOOTSTRAP,
+        variables={"database": database}
+    )
+
+    files = discover_migrations()
+    history = load_history(database)
+    pending = verify_history(files, history)
+
+    print("Migration history verified", flush=True)
+
+    for version in pending:
+        path, digest = files[version]
+
+        print(f"Applying {path.name}", flush=True)
+
+        execute(
+            file=path,
+            variables={"database": database}
+        )
+
+        execute(query=f"""
             INSERT INTO
-                {DATABASE}.CI_CD.SCHEMA_MIGRATIONS
+                {database}.CI_CD.SCHEMA_MIGRATIONS
                 (VERSION, FILE_NAME, CHECKSUM, GIT_SHA)
             VALUES (
-                {sql_literal(version)},
-                {sql_literal(file.name)},
-                {sql_literal(digest)},
-                {sql_literal(git_sha)}
+                {literal(version)},
+                {literal(path.name)},
+                {literal(digest)},
+                {literal(git_sha)}
             )
         """)
 
-        existing[version] = digest
-        print(f"RECORDED {version}", flush=True)
+        print(f"Recorded {version}", flush=True)
 
-    # Detect migrations recorded in Snowflake but
-    # absent from the checked-out repository.
-    missing = set(existing) - seen
-    if missing:
-        raise RuntimeError(
-            "Applied migration files missing: "
-            + ", ".join(sorted(missing))
-        )
+    if environment == "STAGING":
+        validation = "tests/validate_staging.sql"
+    else:
+        validation = "tests/validate_dev.sql"
 
-
-def validate():
-    print("Running DEV validation...", flush=True)
-    run_sql(
-        filename=VALIDATION,
-        variables={"database": DATABASE},
+    execute(
+        file=validation,
+        variables={"database": database}
     )
 
-
-def record_release(git_sha, deployment_id):
-    run_sql(query=f"""
+    execute(query=f"""
         INSERT INTO
-            {DATABASE}.CI_CD.DEPLOYMENT_HISTORY
+            {database}.CI_CD.DEPLOYMENT_HISTORY
             (DEPLOYMENT_ID, GIT_SHA,
              ENVIRONMENT, STATUS)
         VALUES (
-            {sql_literal(deployment_id)},
-            {sql_literal(git_sha)},
-            'DEV',
+            {literal(run_id)},
+            {literal(git_sha)},
+            {literal(environment)},
             'SUCCESS'
         )
     """)
 
+    print(
+        f"SUCCESS: {environment} / {database} / {git_sha}",
+        flush=True
+    )
+
 
 def main():
-    git_sha = os.environ["GITHUB_SHA"]
-    deployment_id = os.environ["GITHUB_RUN_ID"]
-    attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+    environment = os.environ["DEPLOY_ENVIRONMENT"]
+    database = os.environ["DEPLOY_DATABASE"]
 
-    if not re.fullmatch(r"[0-9a-f]{40}", git_sha):
-        raise ValueError("Invalid Git commit SHA")
+    if environment not in DATABASES:
+        raise ValueError("Invalid environment")
 
-    if not deployment_id.isdecimal():
-        raise ValueError("Invalid deployment ID")
+    expected = DATABASES[environment]
 
-    if not attempt.isdecimal():
-        raise ValueError("Invalid run attempt")
+    if environment == "CI":
+        if not re.fullmatch(
+            r"CI_PR_[0-9]+_[0-9]+", database
+        ):
+            raise ValueError("Invalid CI database name")
+    elif database != expected:
+        raise ValueError(
+            f"{environment} must target {expected}"
+        )
 
-    bootstrap()
-    apply_migrations(git_sha)
-    validate()
-
-    record_release(
-        git_sha,
-        f"{deployment_id}-{attempt}",
+    sha = os.environ["GITHUB_SHA"]
+    run_id = (
+        os.environ["GITHUB_RUN_ID"] + "-"
+        + os.environ["GITHUB_RUN_ATTEMPT"]
     )
 
-    print(
-        f"SUCCESS: deployed {git_sha} to {DATABASE}"
-    )
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError("Invalid Git SHA")
+
+    if not re.fullmatch(r"[0-9]+-[0-9]+", run_id):
+        raise ValueError("Invalid run ID")
+
+    run(database, environment, sha, run_id)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as error:
-        print(f"DEPLOYMENT FAILED: {error}", file=sys.stderr)
+    except Exception as exc:
+        print(f"DEPLOYMENT FAILED: {exc}", file=sys.stderr)
         sys.exit(1)

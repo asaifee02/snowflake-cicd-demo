@@ -77,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          DB="CI_PR_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          DB="CI_ETL_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
 
           cleanup() {
             rc=$?
@@ -143,3 +143,90 @@ jobs:
             -D "database=$DB"
 
           echo "All Snowflake integration tests passed"
+
+  migration-test:
+    name: Migration Integration
+    needs: lint-sql
+
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    runs-on: ubuntu-latest
+    environment: ci
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_CI_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_CI_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_CI_WAREHOUSE }}
+
+    steps:
+      - name: Checkout proposed commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Authenticate with Snowflake
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+          cli-version: '3.30.0'
+
+      - name: Test migrations in disposable database
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DB="CI_PR_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+
+          cleanup() {
+            rc=$?
+            trap - EXIT
+            snow sql -x -q \
+              "DROP DATABASE IF EXISTS $DB" || rc=1
+            exit "$rc"
+          }
+
+          trap cleanup EXIT
+
+          snow connection test -x
+          snow sql -x -q "CREATE DATABASE $DB"
+
+          snow sql -x \
+            -f sql/deploy/01_create_schemas.sql \
+            -f sql/deploy/02_create_tables.sql \
+            -D "database=$DB"
+
+          snow sql -x \
+            -f tests/fixtures/batch_1.sql \
+            -D "database=$DB"
+
+          snow sql -x \
+            -f sql/deploy/03_merge_sales.sql \
+            -D "database=$DB" -D "batch_id=1"
+
+          snow sql -x \
+            -f tests/fixtures/batch_2.sql \
+            -D "database=$DB"
+
+          snow sql -x \
+            -f sql/deploy/03_merge_sales.sql \
+            -D "database=$DB" -D "batch_id=2"
+
+          export DEPLOY_ENVIRONMENT=CI
+          export DEPLOY_DATABASE="$DB"
+
+          python scripts/deploy.py
+
+          echo "Testing migration rerun"
+          python scripts/deploy.py

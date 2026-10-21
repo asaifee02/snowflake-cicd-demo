@@ -1,0 +1,117 @@
+
+name: Snowflake DEV to STAGING
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snowflake-sales-promotion
+  cancel-in-progress: false
+
+jobs:
+  deploy-dev:
+    name: Deploy DEV
+    runs-on: ubuntu-latest
+    environment: dev
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      DEPLOY_ENVIRONMENT: DEV
+      DEPLOY_DATABASE: SALES_DEV
+
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+
+    steps:
+      - name: Checkout release SHA
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Authenticate to Snowflake DEV
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+          cli-version: '3.30.0'
+
+      - name: Verify DEV identity
+        run: |
+          snow connection test -x
+          snow sql -x -q \
+            "SELECT CURRENT_USER(), CURRENT_ROLE()"
+
+      - name: Apply and validate DEV migrations
+        run: python scripts/deploy.py
+
+  deploy-staging:
+    name: Deploy STAGING
+    needs: deploy-dev
+
+    runs-on: ubuntu-latest
+    environment: staging
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      DEPLOY_ENVIRONMENT: STAGING
+      DEPLOY_DATABASE: SALES_STAGING
+
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_STAGING_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_STAGING_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_STAGING_WAREHOUSE }}
+
+    steps:
+      - name: Checkout same release SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Configure Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Authenticate to Snowflake STAGING
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+          cli-version: '3.30.0'
+
+      - name: Verify STAGING identity
+        run: |
+          snow connection test -x
+          snow sql -x -q \
+            "SELECT CURRENT_USER(), CURRENT_ROLE()"
+
+      - name: Apply and validate STAGING migrations
+        run: python scripts/deploy.py
+
+      - name: Publish promotion summary
+        if: success()
+        run: |
+          {
+            echo "## DEV → STAGING Promotion"
+            echo ""
+            echo "- Git SHA: $GITHUB_SHA"
+            echo "- DEV: Successful"
+            echo "- STAGING: Successful"
+            echo "- Target database: SALES_STAGING"
+          } >> "$GITHUB_STEP_SUMMARY"
