@@ -1,0 +1,59 @@
+
+MERGE INTO
+    <% database %>.STAGING.SALES_CLEAN AS target
+
+USING (
+    WITH parsed AS (
+        SELECT
+            EVENT_ID,
+            TRY_TO_DECIMAL(ORDER_ID, 10, 0)
+                AS CLEAN_ORDER_ID,
+            NULLIF(TRIM(REGION), '')
+                AS CLEAN_REGION,
+            TRY_TO_DECIMAL(AMOUNT, 12, 2)
+                AS CLEAN_AMOUNT,
+            TRY_TO_DATE(ORDER_DATE, 'YYYY-MM-DD')
+                AS CLEAN_DATE,
+            SOURCE_UPDATED_AT
+        FROM <% database %>.RAW.SALES_EVENTS
+        WHERE BATCH_ID = <% batch_id %>
+    )
+
+    SELECT
+        CLEAN_ORDER_ID AS ORDER_ID,
+        CLEAN_REGION AS REGION,
+        CLEAN_AMOUNT AS AMOUNT,
+        CLEAN_DATE AS ORDER_DATE,
+        SOURCE_UPDATED_AT
+    FROM parsed
+    WHERE CLEAN_ORDER_ID IS NOT NULL
+      AND CLEAN_ORDER_ID > 0
+      AND CLEAN_REGION IS NOT NULL
+      AND CLEAN_AMOUNT > 0
+      AND CLEAN_DATE IS NOT NULL
+      AND SOURCE_UPDATED_AT IS NOT NULL
+
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY CLEAN_ORDER_ID
+        ORDER BY SOURCE_UPDATED_AT DESC, EVENT_ID DESC
+    ) = 1
+) AS source
+
+ON target.ORDER_ID = source.ORDER_ID
+
+WHEN MATCHED
+    AND source.SOURCE_UPDATED_AT > target.SOURCE_UPDATED_AT
+THEN UPDATE SET
+    target.REGION = source.REGION,
+    target.AMOUNT = source.AMOUNT,
+    target.ORDER_DATE = source.ORDER_DATE,
+    target.SOURCE_UPDATED_AT = source.SOURCE_UPDATED_AT
+
+WHEN NOT MATCHED THEN INSERT (
+    ORDER_ID, REGION, AMOUNT,
+    ORDER_DATE, SOURCE_UPDATED_AT
+)
+VALUES (
+    source.ORDER_ID, source.REGION, source.AMOUNT,
+    source.ORDER_DATE, source.SOURCE_UPDATED_AT
+);
