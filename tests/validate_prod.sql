@@ -1,0 +1,84 @@
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    VALIDATION_FAILED EXCEPTION (
+        -20011,
+        'PROD validation or contract check failed'
+    );
+
+    V_SOURCE_COUNT NUMBER;
+    V_VIEW_COUNT NUMBER;
+    V_SOURCE_TOTAL NUMBER(18,2);
+    V_VIEW_TOTAL NUMBER(18,2);
+    V_DUPLICATES NUMBER;
+    V_INVALID NUMBER;
+    V_COLUMNS NUMBER;
+    V_MIGRATION_DUPLICATES NUMBER;
+
+BEGIN
+    SELECT COUNT(*), COALESCE(SUM(AMOUNT), 0)
+    INTO :V_SOURCE_COUNT, :V_SOURCE_TOTAL
+    FROM <% database %>.STAGING.SALES_CLEAN;
+
+    SELECT
+        COALESCE(SUM(TOTAL_ORDERS), 0),
+        COALESCE(SUM(TOTAL_SALES), 0)
+    INTO :V_VIEW_COUNT, :V_VIEW_TOTAL
+    FROM <% database %>.ANALYTICS.DAILY_SALES;
+
+    SELECT COUNT(*)
+    INTO :V_DUPLICATES
+    FROM (
+        SELECT ORDER_ID
+        FROM <% database %>.STAGING.SALES_CLEAN
+        GROUP BY ORDER_ID
+        HAVING COUNT(*) > 1
+    );
+
+    SELECT COUNT(*)
+    INTO :V_INVALID
+    FROM <% database %>.STAGING.SALES_CLEAN
+    WHERE ORDER_ID IS NULL
+       OR REGION IS NULL
+       OR TRIM(REGION) = ''
+       OR AMOUNT IS NULL
+       OR AMOUNT <= 0
+       OR ORDER_DATE IS NULL;
+
+    SELECT COUNT(*)
+    INTO :V_COLUMNS
+    FROM <% database %>.INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'ANALYTICS'
+      AND TABLE_NAME = 'DAILY_SALES'
+      AND (
+          (COLUMN_NAME = 'ORDER_DATE'
+              AND ORDINAL_POSITION = 1)
+          OR (COLUMN_NAME = 'TOTAL_ORDERS'
+              AND ORDINAL_POSITION = 2)
+          OR (COLUMN_NAME = 'TOTAL_SALES'
+              AND ORDINAL_POSITION = 3)
+      );
+
+    SELECT COUNT(*)
+    INTO :V_MIGRATION_DUPLICATES
+    FROM (
+        SELECT VERSION
+        FROM <% database %>.CI_CD.SCHEMA_MIGRATIONS
+        GROUP BY VERSION
+        HAVING COUNT(*) > 1
+    );
+
+    IF (
+        V_SOURCE_COUNT <> V_VIEW_COUNT
+        OR V_SOURCE_TOTAL <> V_VIEW_TOTAL
+        OR V_DUPLICATES <> 0
+        OR V_INVALID <> 0
+        OR V_COLUMNS <> 3
+        OR V_MIGRATION_DUPLICATES <> 0
+    ) THEN
+        RAISE VALIDATION_FAILED;
+    END IF;
+
+    RETURN 'PASS: Production data and view contract validated';
+END;
+$$;

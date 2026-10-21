@@ -10,6 +10,7 @@ from pathlib import Path
 DATABASES = {
     "DEV": "SALES_DEV",
     "STAGING": "SALES_STAGING",
+    "PROD": "SALES_PROD",
     "CI": None,
 }
 
@@ -23,7 +24,8 @@ MIGRATION_PATTERN = re.compile(
 
 
 def execute(query=None, file=None, variables=None):
-    command = ["snow", "sql", "-x", "--format", "JSON", "--enhanced-exit-codes"]
+    command = ["snow", "sql", "-x", "--format",
+               "JSON", "--enhanced-exit-codes"]
 
     if file is not None:
         command += ["-f", str(file)]
@@ -189,10 +191,14 @@ def run(database, environment, git_sha, run_id):
 
         print(f"Recorded {version}", flush=True)
 
-    if environment == "STAGING":
-        validation = "tests/validate_staging.sql"
-    else:
-        validation = "tests/validate_dev.sql"
+    validations = {
+        "DEV": "tests/validate_dev.sql",
+        "STAGING": "tests/validate_staging.sql",
+        "PROD": "tests/validate_prod.sql",
+        "CI": "tests/validate_dev.sql",
+    }
+
+    validation = validations[environment]
 
     execute(
         file=validation,
@@ -237,7 +243,11 @@ def main():
             f"{environment} must target {expected}"
         )
 
-    sha = os.environ["GITHUB_SHA"]
+    sha = os.environ.get(
+        "RELEASE_SHA",
+        os.environ["GITHUB_SHA"],
+    )
+
     run_id = (
         os.environ["GITHUB_RUN_ID"] + "-"
         + os.environ["GITHUB_RUN_ATTEMPT"]
