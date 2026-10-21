@@ -1,0 +1,81 @@
+
+name: Snowflake DEV Deployment
+
+on:
+  push:
+    branches: [main]
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snowflake-sales-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy-dev:
+    name: Deploy to SALES_DEV
+    runs-on: ubuntu-latest
+    environment: dev
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_DEV_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_DEV_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_DEV_WAREHOUSE }}
+
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Snowflake CLI
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+          cli-version: '3.30.0'
+
+      - name: Verify DEV deployment identity
+        run: |
+          snow connection test -x
+
+          snow sql -x -q "
+            SELECT
+              CURRENT_USER(),
+              CURRENT_ROLE(),
+              CURRENT_WAREHOUSE()
+          "
+
+      - name: Prevent non-main deployment
+        env:
+          GIT_REF: ${{ github.ref }}
+        run: |
+          test "$GIT_REF" = "refs/heads/main"
+
+      - name: Run Snowflake DEV deployment
+        run: |
+          python scripts/deploy.py
+
+      - name: Write deployment summary
+        if: success()
+        run: |
+          {
+            echo "## Snowflake DEV Deployment"
+            echo ""
+            echo "- Database: SALES_DEV"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Result: SUCCESS"
+            echo "- Workflow run: $GITHUB_RUN_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
